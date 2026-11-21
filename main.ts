@@ -1,49 +1,57 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+// ANCHORA — The Lighthouse Anchor (make.fun poster bounty entry).
+// Copies the rendered entry.png next to this script to /output/entry.png,
+// validating PNG magic, IHDR CRC, 1024x1024 dimensions and the 1 MiB cap.
+// Node 22 stdlib only. No network.
 import { createHash } from "node:crypto";
+import { copyFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const dir = dirname(fileURLToPath(import.meta.url));
-const src = join(dir, "entry.png");
-const outDir = "/output";
-const out = join(outDir, "entry.png");
+const SRC = join(dirname(fileURLToPath(import.meta.url)), "entry.png");
+const OUT_DIR = "/output";
+const OUT = join(OUT_DIR, "entry.png");
+const MAX_BYTES = 1048576;
 
-if (!existsSync(src)) throw new Error(`entry.png not found next to main.ts: ${src}`);
-const buf = readFileSync(src);
-if (buf.length > 1048576) throw new Error(`entry.png too large: ${buf.length} bytes`);
-const magic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-if (!buf.subarray(0, 8).equals(magic)) throw new Error("entry.png is not a PNG");
-const width = buf.readUInt32BE(16);
-const height = buf.readUInt32BE(20);
-if (width !== 1024 || height !== 1024) {
-  throw new Error(`entry.png must be 1024x1024, got ${width}x${height}`);
-}
-// IHDR CRC: CRC32 over the chunk type + data (bytes 12..28), stored at 29..32
-const crcTable = (() => {
-  const t = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c;
+function crc32(buf) {
+  let table = crc32.table;
+  if (!table) {
+    table = crc32.table = new Int32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      table[n] = c;
+    }
   }
-  return t;
-})();
-const crc32 = (b: Buffer) => {
   let c = 0xffffffff;
-  for (const byte of b) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+  for (const b of buf) c = table[(c ^ b) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
-};
-if (buf.readUInt32BE(8) !== 13 || buf.toString("ascii", 12, 16) !== "IHDR") {
-  throw new Error("entry.png has a malformed IHDR chunk");
-}
-if (crc32(buf.subarray(12, 29)) !== buf.readUInt32BE(29)) {
-  throw new Error("entry.png IHDR CRC mismatch");
 }
 
-mkdirSync(outDir, { recursive: true });
-copyFileSync(src, out);
-const back = readFileSync(out);
-if (back.length !== buf.length) throw new Error("read-back length mismatch");
-const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
-if (sha(back) !== sha(buf)) throw new Error("read-back sha256 mismatch");
-console.log(`ok: /output/entry.png ${back.length} bytes sha256=${sha(back)}`);
+function fail(msg) {
+  console.error("entry validation failed:", msg);
+  process.exit(1);
+}
+
+const data = readFileSync(SRC);
+if (data.length > MAX_BYTES) fail(`entry.png is ${data.length} bytes, over 1 MiB`);
+const MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+if (!data.subarray(0, 8).equals(MAGIC)) fail("not a PNG file");
+if (data.readUInt32BE(8) !== 13 || data.toString("ascii", 12, 16) !== "IHDR") {
+  fail("missing IHDR chunk");
+}
+const width = data.readUInt32BE(16);
+const height = data.readUInt32BE(20);
+if (width !== 1024 || height !== 1024) {
+  fail(`expected 1024x1024, got ${width}x${height}`);
+}
+const storedCrc = data.readUInt32BE(29);
+const computedCrc = crc32(data.subarray(12, 29));
+if (storedCrc !== computedCrc) fail("IHDR CRC mismatch");
+
+mkdirSync(OUT_DIR, { recursive: true });
+copyFileSync(SRC, OUT);
+const back = readFileSync(OUT);
+if (back.length !== data.length) fail("read-back length mismatch");
+const sha = createHash("sha256").update(back).digest("hex");
+console.log(`entry.png ${width}x${height} ${back.length} bytes sha256=${sha}`);
+console.log("wrote /output/entry.png");
