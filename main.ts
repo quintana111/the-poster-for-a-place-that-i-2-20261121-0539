@@ -1,77 +1,49 @@
-// main.ts — NIMBARA poster entry point (Node 22, stdlib only).
-// Reads entry.png from this script's own folder (never a bare relative
-// path, so the grader can run it from any working directory) and checks
-// it is a 1024x1024 PNG under the 1 MiB limit before handing it off.
-import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const source = join(here, "entry.png");
+const dir = dirname(fileURLToPath(import.meta.url));
+const src = join(dir, "entry.png");
+const outDir = "/output";
+const out = join(outDir, "entry.png");
 
-const bytes = readFileSync(source);
-
-function fail(msg: string): never {
-  throw new Error(`entry.png rejected: ${msg}`);
+if (!existsSync(src)) throw new Error(`entry.png not found next to main.ts: ${src}`);
+const buf = readFileSync(src);
+if (buf.length > 1048576) throw new Error(`entry.png too large: ${buf.length} bytes`);
+const magic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+if (!buf.subarray(0, 8).equals(magic)) throw new Error("entry.png is not a PNG");
+const width = buf.readUInt32BE(16);
+const height = buf.readUInt32BE(20);
+if (width !== 1024 || height !== 1024) {
+  throw new Error(`entry.png must be 1024x1024, got ${width}x${height}`);
 }
-
-const MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-if (bytes.length < 8 || !MAGIC.every((b, i) => bytes[i] === b)) {
-  fail("not a PNG file");
-}
-// Validate the IHDR chunk CRC so a truncated or corrupted header is
-// caught even when the magic bytes and dimensions still look right.
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
+// IHDR CRC: CRC32 over the chunk type + data (bytes 12..28), stored at 29..32
+const crcTable = (() => {
+  const t = new Int32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c >>> 0;
+    t[n] = c;
   }
-  return table;
+  return t;
 })();
-function crc32(buf: Buffer): number {
+const crc32 = (b: Buffer) => {
   let c = 0xffffffff;
-  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  for (const byte of b) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
+};
+if (buf.readUInt32BE(8) !== 13 || buf.toString("ascii", 12, 16) !== "IHDR") {
+  throw new Error("entry.png has a malformed IHDR chunk");
 }
-if (bytes.length < 33 || bytes.toString("ascii", 12, 16) !== "IHDR") {
-  fail("missing IHDR chunk");
+if (crc32(buf.subarray(12, 29)) !== buf.readUInt32BE(29)) {
+  throw new Error("entry.png IHDR CRC mismatch");
 }
-const ihdrLen = bytes.readUInt32BE(8);
-if (ihdrLen !== 13) {
-  fail(`unexpected IHDR length: ${ihdrLen}`);
-}
-const storedCrc = bytes.readUInt32BE(29);
-const actualCrc = crc32(bytes.subarray(12, 29));
-if (storedCrc !== actualCrc) {
-  fail(`IHDR CRC mismatch: ${storedCrc.toString(16)} != ${actualCrc.toString(16)}`);
-}
-if (bytes.length > 1024 * 1024) {
-  fail(`too large: ${bytes.length} bytes (limit 1 MiB)`);
-}
-const w = bytes.readUInt32BE(16);
-const h = bytes.readUInt32BE(20);
-if (w !== 1024 || h !== 1024) {
-  fail(`wrong size: ${w}x${h} (expected 1024x1024)`);
-}
-const digest = createHash("sha256").update(bytes).digest("hex");
 
-// Copy the validated image to /output and prove the copy is identical.
-const targetDir = "/output";
-const target = join(targetDir, "entry.png");
-
-mkdirSync(targetDir, { recursive: true });
-copyFileSync(source, target);
-
-const again = readFileSync(target);
-if (again.length !== bytes.length) {
-  fail(`copy length mismatch: ${again.length} != ${bytes.length}`);
-}
-const digest2 = createHash("sha256").update(again).digest("hex");
-if (digest2 !== digest) {
-  fail(`copy sha256 mismatch: ${digest2} != ${digest}`);
-}
-console.log(`entry.png ${w}x${h} ${bytes.length} bytes sha256 ${digest}`);
-console.log(`verified ${target} sha256 ${digest2}`);
+mkdirSync(outDir, { recursive: true });
+copyFileSync(src, out);
+const back = readFileSync(out);
+if (back.length !== buf.length) throw new Error("read-back length mismatch");
+const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+if (sha(back) !== sha(buf)) throw new Error("read-back sha256 mismatch");
+console.log(`ok: /output/entry.png ${back.length} bytes sha256=${sha(back)}`);
